@@ -138,8 +138,13 @@ func (s *Server) listAdminRegistryApps(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	apps := s.configuredRegistryApps()
+	snapshot, err := s.appFleetProjector.Snapshot(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load registry fleet state")
+		return
+	}
 	out, err := loadAdminRegistryAppSummaries(apps, func(app configuredRegistryApp) (adminRegistryAppSummary, error) {
-		return s.loadAdminRegistryAppSummary(r, app, nil)
+		return s.loadAdminRegistryAppSummary(r, app, nil, snapshot)
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load registry app state")
@@ -207,7 +212,12 @@ func (s *Server) getAdminRegistryApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load known app versions")
 		return
 	}
-	summary, err := s.loadAdminRegistryAppSummary(r, app, known)
+	snapshot, err := s.appFleetProjector.Snapshot(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load registry fleet state")
+		return
+	}
+	summary, err := s.loadAdminRegistryAppSummary(r, app, known, snapshot)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load registry app state")
 		return
@@ -367,7 +377,7 @@ func (s *Server) registryApp(name string) (configuredRegistryApp, bool) {
 	return configuredRegistryApp{}, false
 }
 
-func (s *Server) loadAdminRegistryAppSummary(r *http.Request, app configuredRegistryApp, known []*core.AppInstallation) (adminRegistryAppSummary, error) {
+func (s *Server) loadAdminRegistryAppSummary(r *http.Request, app configuredRegistryApp, known []*core.AppInstallation, snapshot *appregistry.FleetSnapshot) (adminRegistryAppSummary, error) {
 	var err error
 	if known == nil {
 		known, err = s.appVersionChanges.ListKnownVersionsByApp(r.Context(), app.name)
@@ -380,17 +390,15 @@ func (s *Server) loadAdminRegistryAppSummary(r *http.Request, app configuredRegi
 		Registry:       app.registry,
 		DesiredVersion: coredata.LatestKnownVersion(known),
 	}
-	projection, err := s.appFleetProjector.Project(r.Context(), app.name)
-	if err != nil {
-		return adminRegistryAppSummary{}, err
-	}
-	summary.FleetState = adminAppFleetStateFromCore(projection)
 	rollout, err := s.appRollouts.Get(r.Context(), app.name)
 	if errors.Is(err, core.ErrNotFound) {
-		return summary, nil
-	}
-	if err != nil {
+		rollout = nil
+	} else if err != nil {
 		return adminRegistryAppSummary{}, err
+	}
+	summary.FleetState = adminAppFleetStateFromCore(snapshot.Project(app.name, summary.DesiredVersion, rollout))
+	if rollout == nil {
+		return summary, nil
 	}
 	rows, err := s.appMaterializations.ListByAppVersion(r.Context(), app.name, rollout.Version)
 	if err != nil {

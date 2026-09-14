@@ -38,46 +38,20 @@ type FleetProjector struct {
 }
 
 func (p *FleetProjector) Project(ctx context.Context, app string) (*core.AppFleetProjection, error) {
-	if p == nil || p.ChangeRequests == nil || p.SourceVersions == nil || p.Heartbeats == nil {
+	if p == nil || p.ChangeRequests == nil {
 		return nil, fmt.Errorf("fleet projector is not configured")
 	}
 	app = strings.TrimSpace(app)
 	if app == "" {
 		return nil, fmt.Errorf("fleet projector: app is required")
 	}
-	now := p.now()
-	ttl := p.HeartbeatTTL
-	if ttl <= 0 {
-		return nil, fmt.Errorf("fleet projector: heartbeat TTL must be positive")
+	snapshot, err := p.Snapshot(ctx)
+	if err != nil {
+		return nil, err
 	}
 	known, err := p.ChangeRequests.ListKnownVersionsByApp(ctx, app)
 	if err != nil {
 		return nil, fmt.Errorf("project fleet state: load desired version: %w", err)
-	}
-	desiredVersion := coredata.LatestKnownVersion(known)
-
-	sourceState, err := p.SourceVersions.Get(ctx)
-	if err != nil {
-		if errors.Is(err, core.ErrNotFound) {
-			projection := EvaluateFleetState(FleetEvaluation{
-				App:            app,
-				DesiredVersion: desiredVersion,
-				Cutoff:         now.Add(-ttl),
-				EvaluatedAt:    now,
-			})
-			projection.HeartbeatTTL = ttl
-			return &projection, nil
-		}
-		return nil, fmt.Errorf("project fleet state: load source version: %w", err)
-	}
-	sourceVersion := strings.TrimSpace(sourceState.CurrentSourceVersion)
-	minimum := sourceState.MinimumHealthyInstances
-	var heartbeats []*core.GestaltdInstanceHeartbeat
-	if sourceVersion != "" {
-		heartbeats, err = p.Heartbeats.ListFreshBySourceVersion(ctx, sourceVersion, now.Add(-ttl))
-		if err != nil {
-			return nil, fmt.Errorf("project fleet state: load fresh heartbeats: %w", err)
-		}
 	}
 	var rollout *core.AppRollout
 	if p.Rollouts != nil {
@@ -89,18 +63,52 @@ func (p *FleetProjector) Project(ctx context.Context, app string) (*core.AppFlee
 			rollout = nil
 		}
 	}
-	projection := EvaluateFleetState(FleetEvaluation{
-		App:                     app,
-		DesiredVersion:          desiredVersion,
-		SourceVersion:           sourceVersion,
-		MinimumHealthyInstances: minimum,
-		Cutoff:                  now.Add(-ttl),
-		EvaluatedAt:             now,
-		Heartbeats:              heartbeats,
-		ActiveRollout:           rollout,
-	})
-	projection.HeartbeatTTL = ttl
-	return &projection, nil
+	return snapshot.Project(app, coredata.LatestKnownVersion(known), rollout), nil
+}
+
+// FleetSnapshot holds the shared basis for one read of several apps. Project
+// performs no storage reads, so list rows use the same source and heartbeat cutoff.
+type FleetSnapshot struct{ basis FleetEvaluation }
+
+func (p *FleetProjector) Snapshot(ctx context.Context) (*FleetSnapshot, error) {
+	if p == nil || p.SourceVersions == nil || p.Heartbeats == nil {
+		return nil, fmt.Errorf("fleet projector is not configured")
+	}
+	if p.HeartbeatTTL <= 0 {
+		return nil, fmt.Errorf("fleet projector: heartbeat TTL must be positive")
+	}
+	now := p.now()
+	snapshot := &FleetSnapshot{basis: FleetEvaluation{
+		EvaluatedAt: now, Cutoff: now.Add(-p.HeartbeatTTL),
+	}}
+	source, err := p.SourceVersions.Get(ctx)
+	if errors.Is(err, core.ErrNotFound) {
+		return snapshot, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("project fleet state: load source version: %w", err)
+	}
+	if source == nil {
+		return snapshot, nil
+	}
+	snapshot.basis.SourceVersion = strings.TrimSpace(source.CurrentSourceVersion)
+	snapshot.basis.MinimumHealthyInstances = source.MinimumHealthyInstances
+	if snapshot.basis.SourceVersion != "" {
+		snapshot.basis.Heartbeats, err = p.Heartbeats.ListFreshBySourceVersion(ctx, snapshot.basis.SourceVersion, snapshot.basis.Cutoff)
+		if err != nil {
+			return nil, fmt.Errorf("project fleet state: load fresh heartbeats: %w", err)
+		}
+	}
+	return snapshot, nil
+}
+
+func (s *FleetSnapshot) Project(app, desiredVersion string, rollout *core.AppRollout) *core.AppFleetProjection {
+	input := s.basis
+	input.App = app
+	input.DesiredVersion = desiredVersion
+	input.ActiveRollout = rollout
+	projection := EvaluateFleetState(input)
+	return &projection
 }
 
 // ProjectForRollout evaluates the fleet using the rollout's admission
