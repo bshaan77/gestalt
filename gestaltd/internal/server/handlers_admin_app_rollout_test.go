@@ -38,7 +38,7 @@ func TestAdminRegistryApps(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		body, err := io.ReadAll(resp.Body)
 		if err != nil || resp.StatusCode != http.StatusOK || string(body) != "[]\n" {
 			t.Fatalf("empty registry response: status=%d body=%s error=%v", resp.StatusCode, body, err)
