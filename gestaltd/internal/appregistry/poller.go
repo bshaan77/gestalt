@@ -377,6 +377,9 @@ func (p *CatalogPoller) reconcileApp(
 	if appName == "" {
 		return nil
 	}
+	// The catalog retains installations from other source configurations.
+	// Local work is scoped to configured apps; shared rollouts still advance.
+	configured := p.AppRestarter == nil || p.AppRestarter.Configured(appName)
 	if !p.beginInflight(appName) {
 		return nil
 	}
@@ -404,11 +407,13 @@ func (p *CatalogPoller) reconcileApp(
 			}
 			return nil
 		}
-		materialization, err := p.ensureAcknowledged(ctx, instanceID, appName, rolloutVersion, rollout.CreatedAt, materializations)
-		if err != nil {
-			return err
+		if configured {
+			materialization, err := p.ensureAcknowledged(ctx, instanceID, appName, rolloutVersion, rollout.CreatedAt, materializations)
+			if err != nil {
+				return err
+			}
+			rolloutMaterialization = materialization
 		}
-		rolloutMaterialization = materialization
 		if rollout.State == core.AppRolloutStateEnrolling {
 			if p.now().Before(rollout.EnrollmentEndsAt) {
 				restartBlocked = true
@@ -434,7 +439,7 @@ func (p *CatalogPoller) reconcileApp(
 		}
 	}
 
-	if len(installations) == 0 {
+	if !configured || len(installations) == 0 {
 		return nil
 	}
 

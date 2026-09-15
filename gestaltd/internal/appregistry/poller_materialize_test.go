@@ -12,6 +12,7 @@ import (
 	"github.com/valon-technologies/gestalt/server/core"
 	"github.com/valon-technologies/gestalt/server/internal/appregistry"
 	"github.com/valon-technologies/gestalt/server/internal/appregistry/registrytest"
+	"github.com/valon-technologies/gestalt/server/internal/bootstrap"
 	"github.com/valon-technologies/gestalt/server/internal/config"
 	"github.com/valon-technologies/gestalt/server/internal/coredata"
 	"github.com/valon-technologies/gestalt/server/internal/testutil"
@@ -24,6 +25,8 @@ type recordingAppRestarter struct {
 	runningVersion string
 	startErr       error
 }
+
+func (*recordingAppRestarter) Configured(string) bool { return true }
 
 func (r *recordingAppRestarter) Restartable(app string) (bool, error) {
 	return true, nil
@@ -109,6 +112,60 @@ func (h *pollerMaterializationHarness) materialization(t *testing.T) *core.AppIn
 		t.Fatalf("Get materialization: %v", err)
 	}
 	return materialization
+}
+
+func TestCatalogPollerPreservesUnconfiguredInstallations(t *testing.T) {
+	t.Parallel()
+	h := newPollerMaterializationHarness(t, "toolshed", true)
+	h.poller.AppRestarter = bootstrap.NewAppProviderRestarter(bootstrap.AppProviderRestarterConfig{Config: &config.Config{}})
+	close(h.restartReady)
+	if err := h.poller.ReconcileOnce(h.ctx); err != nil {
+		t.Fatalf("reconcile historical installation: %v", err)
+	}
+	materializations, err := h.services.AppInstanceMaterializations.ListByInstance(h.ctx, "replica-a")
+	if err != nil || len(materializations) != 0 {
+		t.Fatalf("unconfigured app created instance state: %v %v", materializations, err)
+	}
+	known, err := h.services.AppVersionChangeRequests.ListAllKnownVersions(h.ctx)
+	if err != nil || len(known) != 1 || known[0].AppName != "g-issues" {
+		t.Fatalf("installation history changed: %v %v", known, err)
+	}
+	start := h.clock
+	if _, err := h.services.AppRollouts.Create(h.ctx, &core.AppRollout{
+		App: "g-issues", Version: h.fixture.Version, State: core.AppRolloutStateEnrolling,
+		CreatedAt: start, EnrollmentEndsAt: start.Add(time.Minute), Deadline: start.Add(2 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range []struct {
+		after time.Duration
+		want  core.AppRolloutState
+	}{{time.Minute, core.AppRolloutStateRestarting}, {2 * time.Minute, core.AppRolloutStateFailed}} {
+		h.clock = start.Add(step.after)
+		if err := h.poller.ReconcileOnce(h.ctx); err != nil {
+			t.Fatalf("reconcile unconfigured rollout: %v", err)
+		}
+		rollout, err := h.services.AppRollouts.Get(h.ctx, "g-issues")
+		if err != nil || rollout.State != step.want {
+			t.Fatalf("rollout after %s: %v %v, want %s", step.after, rollout, err, step.want)
+		}
+	}
+	active, err := h.services.AppRollouts.ListActive(h.ctx)
+	if err != nil || len(active) != 0 {
+		t.Fatalf("expired rollout still blocks admission: %v %v", active, err)
+	}
+	materializations, err = h.services.AppInstanceMaterializations.ListByInstance(h.ctx, "replica-a")
+	if err != nil || len(materializations) != 0 {
+		t.Fatalf("unconfigured rollout enrolled the instance: %v %v", materializations, err)
+	}
+	// A source that configures the app can still converge the same installation.
+	h.poller.AppRestarter = h.restarter
+	if err := h.poller.ReconcileOnce(h.ctx); err != nil {
+		t.Fatalf("reconcile configured installation: %v", err)
+	}
+	if len(h.restarter.startCalls) != 1 || h.restarter.startCalls[0] != "g-issues" {
+		t.Fatalf("configured app did not start: %v", h.restarter.startCalls)
+	}
 }
 
 func TestCatalogPollerMaterializesBeforeStop(t *testing.T) {
