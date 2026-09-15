@@ -138,6 +138,10 @@ func (s *Server) listAdminRegistryApps(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	apps := s.configuredRegistryApps()
+	if len(apps) == 0 {
+		writeJSON(w, http.StatusOK, []adminRegistryAppSummary{})
+		return
+	}
 	snapshot, err := s.appFleetProjector.Snapshot(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load registry fleet state")

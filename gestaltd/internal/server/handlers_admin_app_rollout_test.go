@@ -20,6 +20,30 @@ import (
 
 func TestAdminRegistryApps(t *testing.T) {
 	t.Parallel()
+	t.Run("empty list remains available when fleet storage is unavailable", func(t *testing.T) {
+		t.Parallel()
+		db := &coretesting.StubIndexedDB{}
+		services, err := coredata.New(db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		testutil.AttachStubExternalCredentials(services)
+		ts := newTestServer(t, func(cfg *server.Config) {
+			cfg.Services = services
+			cfg.AppDefs = map[string]*config.ProviderEntry{}
+		})
+		defer ts.Close()
+		db.Err = errors.New("fleet storage unavailable")
+		resp, err := http.Get(ts.URL + "/admin/api/v1/registry-apps")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil || resp.StatusCode != http.StatusOK || string(body) != "[]\n" {
+			t.Fatalf("empty registry response: status=%d body=%s error=%v", resp.StatusCode, body, err)
+		}
+	})
 
 	t.Run("lists registry managed apps", func(t *testing.T) {
 		t.Parallel()

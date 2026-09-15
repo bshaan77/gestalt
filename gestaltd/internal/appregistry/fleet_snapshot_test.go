@@ -33,6 +33,7 @@ func (h *snapshotHeartbeats) ListFreshBySourceVersion(context.Context, string, t
 }
 
 func TestFleetSnapshotSharesReadsAndEvaluationTime(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 9, 14, 21, 0, 0, 0, time.UTC)
 	source := &snapshotSource{state: &core.GestaltdSourceVersionState{CurrentSourceVersion: "source", MinimumHealthyInstances: 1}}
 	apps := map[string]core.GestaltdInstanceAppHeartbeat{}
@@ -60,6 +61,7 @@ func TestFleetSnapshotSharesReadsAndEvaluationTime(t *testing.T) {
 }
 
 func TestFleetSnapshotMissingSourceAndErrors(t *testing.T) {
+	t.Parallel()
 	for _, sourceErr := range []error{core.ErrNotFound, errors.New("storage unavailable")} {
 		source := &snapshotSource{err: sourceErr}
 		heartbeats := &snapshotHeartbeats{}
