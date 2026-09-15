@@ -142,13 +142,13 @@ func (s *Server) listAdminRegistryApps(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, []adminRegistryAppSummary{})
 		return
 	}
-	snapshot, err := s.appFleetProjector.Snapshot(r.Context())
+	fleet, err := s.appFleetProjector.ReadFleet(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load registry fleet state")
 		return
 	}
 	out, err := loadAdminRegistryAppSummaries(apps, func(app configuredRegistryApp) (adminRegistryAppSummary, error) {
-		return s.loadAdminRegistryAppSummary(r, app, nil, snapshot)
+		return s.loadAdminRegistryAppSummary(r, app, nil, fleet)
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load registry app state")
@@ -216,12 +216,12 @@ func (s *Server) getAdminRegistryApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load known app versions")
 		return
 	}
-	snapshot, err := s.appFleetProjector.Snapshot(r.Context())
+	fleet, err := s.appFleetProjector.ReadFleet(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load registry fleet state")
 		return
 	}
-	summary, err := s.loadAdminRegistryAppSummary(r, app, known, snapshot)
+	summary, err := s.loadAdminRegistryAppSummary(r, app, known, fleet)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load registry app state")
 		return
@@ -381,7 +381,7 @@ func (s *Server) registryApp(name string) (configuredRegistryApp, bool) {
 	return configuredRegistryApp{}, false
 }
 
-func (s *Server) loadAdminRegistryAppSummary(r *http.Request, app configuredRegistryApp, known []*core.AppInstallation, snapshot *appregistry.FleetSnapshot) (adminRegistryAppSummary, error) {
+func (s *Server) loadAdminRegistryAppSummary(r *http.Request, app configuredRegistryApp, known []*core.AppInstallation, fleet appregistry.FleetEvaluation) (adminRegistryAppSummary, error) {
 	var err error
 	if known == nil {
 		known, err = s.appVersionChanges.ListKnownVersionsByApp(r.Context(), app.name)
@@ -400,7 +400,11 @@ func (s *Server) loadAdminRegistryAppSummary(r *http.Request, app configuredRegi
 	} else if err != nil {
 		return adminRegistryAppSummary{}, err
 	}
-	summary.FleetState = adminAppFleetStateFromCore(snapshot.Project(app.name, summary.DesiredVersion, rollout))
+	fleet.App = app.name
+	fleet.DesiredVersion = summary.DesiredVersion
+	fleet.ActiveRollout = rollout
+	projection := appregistry.EvaluateFleetState(fleet)
+	summary.FleetState = adminAppFleetStateFromCore(&projection)
 	if rollout == nil {
 		return summary, nil
 	}
