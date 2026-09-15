@@ -46,13 +46,10 @@ func (s *Server) checkResourceAccess(
 	}
 	cache := listingDecisionCacheFromContext(ctx)
 	key := newListingDecisionKey(req)
-	if decision, ok := cache.decision(key); ok {
-		return decision, nil
+	if result, ok := cache.decision(key); ok {
+		return result.decision, result.err
 	}
 	decision, err := invocation.CheckResourceAccess(ctx, s.authorization, req)
-	if err != nil {
-		return invocation.ResourceAccessDecision{}, err
-	}
-	cache.putDecision(key, decision)
-	return decision, nil
+	cache.putDecision(key, decision, err)
+	return decision, err
 }

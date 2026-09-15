@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"log/slog"
 	"strings"
 	"sync"
 
@@ -31,18 +30,16 @@ func newListingDecisionKey(req invocation.ResourceAccessRequest) listingDecision
 	}
 }
 
-// listingDecisionCache memoizes evaluator answers and active-model reads for
-// the lifetime of one listing request.
-//
-// It is a cache, never a decision maker. Every entry is produced by the same
-// helpers the single-decision path uses, and only successful answers are
-// stored, so reading from the cache cannot change an answer - it can only
-// remove a repeat of the same provider call. That is what makes it safe to
-// batch a listing: the per-app code path is untouched and still asks
-// checkResourceAccess, which now finds the answer already present.
+type listingDecisionResult struct {
+	decision invocation.ResourceAccessDecision
+	err      error
+}
+
+// listingDecisionCache reuses answers and failures for one listing request.
+// Per-entry projection decides whether an unavailable decision prevents access.
 type listingDecisionCache struct {
 	mu        sync.Mutex
-	decisions map[listingDecisionKey]invocation.ResourceAccessDecision
+	decisions map[listingDecisionKey]listingDecisionResult
 	models    map[string]mountedUIModelSnapshot
 }
 
@@ -52,7 +49,7 @@ type listingDecisionCacheContextKey struct{}
 // surfaces install one; every other surface keeps making its own calls.
 func withListingDecisionCache(ctx context.Context) (context.Context, *listingDecisionCache) {
 	cache := &listingDecisionCache{
-		decisions: make(map[listingDecisionKey]invocation.ResourceAccessDecision),
+		decisions: make(map[listingDecisionKey]listingDecisionResult),
 		models:    make(map[string]mountedUIModelSnapshot),
 	}
 	return context.WithValue(ctx, listingDecisionCacheContextKey{}, cache), cache
@@ -66,9 +63,9 @@ func listingDecisionCacheFromContext(ctx context.Context) *listingDecisionCache 
 	return cache
 }
 
-func (c *listingDecisionCache) decision(key listingDecisionKey) (invocation.ResourceAccessDecision, bool) {
+func (c *listingDecisionCache) decision(key listingDecisionKey) (listingDecisionResult, bool) {
 	if c == nil {
-		return invocation.ResourceAccessDecision{}, false
+		return listingDecisionResult{}, false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -76,13 +73,13 @@ func (c *listingDecisionCache) decision(key listingDecisionKey) (invocation.Reso
 	return decision, ok
 }
 
-func (c *listingDecisionCache) putDecision(key listingDecisionKey, decision invocation.ResourceAccessDecision) {
+func (c *listingDecisionCache) putDecision(key listingDecisionKey, decision invocation.ResourceAccessDecision, err error) {
 	if c == nil {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.decisions[key] = decision
+	c.decisions[key] = listingDecisionResult{decision: decision, err: err}
 }
 
 func (c *listingDecisionCache) model(typeName string) (mountedUIModelSnapshot, bool) {
@@ -104,15 +101,9 @@ func (c *listingDecisionCache) putModel(typeName string, snapshot mountedUIModel
 	c.models[typeName] = snapshot
 }
 
-// prefetchListingDecisions answers every question a listing is about to ask
-// with ONE batched provider call and stores the answers in the request's
-// decision cache.
-//
-// A batch the provider cannot serve is deliberately not an error here. The
-// cache simply stays empty and each entry falls back to the single-decision
-// path that already shipped, so listing degrades to more provider calls and
-// never to fewer visible apps. Whatever the evaluator does answer is enforced
-// identically either way, and invoke-time enforcement is unchanged.
+// prefetchListingDecisions fills the request cache using bounded batches.
+// Failed and unattempted questions retain the batch error so projection never
+// retries them individually against the same unavailable dependency.
 func (s *Server) prefetchListingDecisions(ctx context.Context, reqs []invocation.ResourceAccessRequest) {
 	cache := listingDecisionCacheFromContext(ctx)
 	if s == nil || s.authorization == nil || cache == nil || len(reqs) == 0 {
@@ -132,14 +123,18 @@ func (s *Server) prefetchListingDecisions(ctx context.Context, reqs []invocation
 		unique = append(unique, req)
 	}
 
-	decisions, err := invocation.CheckResourceAccessMany(ctx, s.authorization, unique)
-	if err != nil {
-		slog.WarnContext(ctx, "auth: batched listing decision unavailable; falling back to per-item decisions",
-			"error", err, "requests", len(unique))
-		return
-	}
-	for i, decision := range decisions {
-		cache.putDecision(keys[i], decision)
+	for start := 0; start < len(unique); start += invocation.MaxBatchedAccessChecks {
+		end := min(start+invocation.MaxBatchedAccessChecks, len(unique))
+		decisions, err := invocation.CheckResourceAccessMany(ctx, s.authorization, unique[start:end])
+		if err != nil {
+			for _, key := range keys[start:] {
+				cache.putDecision(key, invocation.ResourceAccessDecision{}, err)
+			}
+			return
+		}
+		for i, decision := range decisions {
+			cache.putDecision(keys[start+i], decision, nil)
+		}
 	}
 }
 
