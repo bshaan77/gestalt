@@ -456,7 +456,7 @@ type federatedLogoutAuthStub struct {
 	logoutPrefix string
 }
 
-func (s *federatedLogoutAuthStub) FederatedLogoutURL(returnTo string) (string, error) {
+func (s *federatedLogoutAuthStub) FederatedLogoutURL(_ context.Context, returnTo string) (string, error) {
 	prefix := strings.TrimSpace(s.logoutPrefix)
 	if prefix == "" {
 		prefix = "https://idp.example.test/v2/logout"
