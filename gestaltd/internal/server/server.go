@@ -100,6 +100,7 @@ type AppRuntimeState interface {
 type userStore interface {
 	principal.CredentialUserResolver
 	GetUser(ctx context.Context, id string) (*core.User, error)
+	ListUsers(ctx context.Context) ([]*core.User, error)
 }
 
 // credentialUserResolver returns the user store used to canonicalize human
