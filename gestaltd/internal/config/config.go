@@ -2014,17 +2014,6 @@ type ServerConfig struct {
 	SCIM          ServerSCIMConfig         `yaml:"scim,omitempty"`
 	AppRegistry   ServerAppRegistryConfig  `yaml:"appRegistry,omitempty"`
 	AutoActivate  *bool                    `yaml:"autoActivate,omitempty"`
-	// PromoteSharedStateOnActivate gates whether POST /activate may promote
-	// shared gestaltd source-version and rollout coordination state. When
-	// false, /activate only prepares local providers; POST /promote performs
-	// shared promotion explicitly. When unset, /activate keeps promoting shared
-	// state for backward compatibility.
-	PromoteSharedStateOnActivate *bool `yaml:"promoteSharedStateOnActivate,omitempty"`
-	// RejectSharedStatePromotion rejects POST /promote and POST /promote/registry
-	// before any registry or Temporal side effects. Use with
-	// promoteSharedStateOnActivate: false to fence all shared promotion writers
-	// while keeping local /activate preparation available.
-	RejectSharedStatePromotion *bool `yaml:"rejectSharedStatePromotion,omitempty"`
 	// AuthorizationStateApply gates whether server startup is allowed to
 	// overwrite active authorization provider state. When unset, the
 	// GESTALTD_AUTHORIZATION_STATE_APPLY environment variable is consulted;
@@ -2032,32 +2021,11 @@ type ServerConfig struct {
 	// authorization state it would have applied. This keeps no-traffic
 	// candidates from mutating shared authorization state by default.
 	AuthorizationStateApply *bool `yaml:"authorizationStateApply,omitempty"`
-	// UIReadiness gates startup admission on local mounted-UI qualification and
-	// exposes instance-scoped fleet readiness reports for Plan 11 milestone 2.
-	UIReadiness *UIReadinessConfig `yaml:"uiReadiness,omitempty"`
 	// Dev is set programmatically when gestaltd is launched via the dev
 	// subcommand. It gates CLI config resolution and reverse-tunnel startup.
 	Dev bool `yaml:"-"`
 	// RemotePreviewServe is set when gestaltd serve runs with --remote-preview.
 	RemotePreviewServe bool `yaml:"-"`
-}
-
-// UIReadinessConfig controls local UI qualification for startup admission and
-// fleet readiness reporting.
-type UIReadinessConfig struct {
-	Enabled          *bool    `yaml:"enabled,omitempty"`
-	ReleaseID        string   `yaml:"releaseId,omitempty"`
-	ProbeBearerToken string   `yaml:"probeBearerToken,omitempty"`
-	ExtraProbePaths  []string `yaml:"extraProbePaths,omitempty"`
-	RecheckInterval  string   `yaml:"recheckInterval,omitempty"`
-}
-
-func (c UIReadinessConfig) RecheckIntervalDuration() (time.Duration, error) {
-	raw := strings.TrimSpace(c.RecheckInterval)
-	if raw == "" {
-		return 0, nil
-	}
-	return time.ParseDuration(raw)
 }
 
 // TODO(app-registry-step-9): Remove this temporary rollout configuration after step 9 is complete.

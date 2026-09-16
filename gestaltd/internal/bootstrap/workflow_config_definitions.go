@@ -31,20 +31,12 @@ type desiredWorkflowConfigDefinition struct {
 
 type workflowConfigProviderFilter func(providerName string) bool
 
-type workflowConfigReconcileOptions struct {
-	// When false, apply desired config-managed definitions but skip deleting
-	// cfg_* definitions missing from the local desired set. Isolated preparation
-	// (promoteSharedStateOnActivate: false) uses this so overlapping revisions
-	// cannot prune another release's shared workflow catalog entries.
-	allowDestructiveCleanup bool
-}
-
-func reconcileWorkflowConfigDefinitions(ctx context.Context, cfg *config.Config, runtime *workflowRuntime, appDecls *appWorkflowDeclarations, includeProvider workflowConfigProviderFilter, opts workflowConfigReconcileOptions) error {
+func reconcileWorkflowConfigDefinitions(ctx context.Context, cfg *config.Config, runtime *workflowRuntime, appDecls *appWorkflowDeclarations, includeProvider workflowConfigProviderFilter) error {
 	var reported map[string][]*proto.WorkflowDefinitionSpec
 	if appDecls != nil {
 		reported = appDecls.Snapshot()
 	}
-	return reconcileWorkflowConfigDefinitionsFromDeclarations(ctx, cfg, runtime, reported, includeProvider, "", opts)
+	return reconcileWorkflowConfigDefinitionsFromDeclarations(ctx, cfg, runtime, reported, includeProvider, "")
 }
 
 func reconcileAppWorkflowDefinitions(ctx context.Context, cfg *config.Config, runtime *workflowRuntime, appDecls *appWorkflowDeclarations, app string) error {
@@ -67,11 +59,10 @@ func reconcileAppWorkflowDefinitions(ctx context.Context, cfg *config.Config, ru
 		reported,
 		workflowConfigOnlyProvider(defaultProvider),
 		app,
-		workflowConfigReconcileOptions{allowDestructiveCleanup: true},
 	)
 }
 
-func reconcileWorkflowConfigDefinitionsFromDeclarations(ctx context.Context, cfg *config.Config, runtime *workflowRuntime, reported map[string][]*proto.WorkflowDefinitionSpec, includeProvider workflowConfigProviderFilter, app string, opts workflowConfigReconcileOptions) error {
+func reconcileWorkflowConfigDefinitionsFromDeclarations(ctx context.Context, cfg *config.Config, runtime *workflowRuntime, reported map[string][]*proto.WorkflowDefinitionSpec, includeProvider workflowConfigProviderFilter, app string) error {
 	if cfg == nil || runtime == nil {
 		return nil
 	}
@@ -140,10 +131,8 @@ func reconcileWorkflowConfigDefinitionsFromDeclarations(ctx context.Context, cfg
 		}
 	}
 
-	if opts.allowDestructiveCleanup {
-		if err := cleanupRemovedWorkflowConfigDefinitions(ctx, cfg, runtime, reported, desired, includeProvider, app); err != nil {
-			return err
-		}
+	if err := cleanupRemovedWorkflowConfigDefinitions(ctx, cfg, runtime, reported, desired, includeProvider, app); err != nil {
+		return err
 	}
 	return nil
 }

@@ -301,9 +301,6 @@ type Result struct {
 	startAppProviders                   func()
 	appProvidersInitialized             chan struct{}
 	activateAppProviders                func(context.Context)
-	pendingAppSHAs                      *pendingAppSHAWriter
-	deferSharedStartupWrites            bool
-	sharedStatePromoted                 bool
 	startup                             *deferredProviders
 	deferred                            *deferredProviders
 	mu                                  sync.Mutex
@@ -365,7 +362,7 @@ func (r *Result) StartRegistryApps(ctx context.Context) error {
 		if r.appProvidersInitialized != nil {
 			close(r.appProvidersInitialized)
 		}
-		if r.startupWorkflowConfigReconcile != nil && !r.deferSharedStartupWrites {
+		if r.startupWorkflowConfigReconcile != nil {
 			r.registryAppStartupErr = r.startupWorkflowConfigReconcile(ctx)
 			if r.registryAppStartupErr != nil && ctx.Err() == nil {
 				go runWorkflowConfigReconcileTask(ctx, workflowConfigReconcileTask{
@@ -373,7 +370,6 @@ func (r *Result) StartRegistryApps(ctx context.Context) error {
 					reconcile: r.startupWorkflowConfigReconcile,
 				})
 			}
-			r.startupWorkflowConfigReconcile = nil
 		}
 	})
 	return r.registryAppStartupErr
@@ -393,79 +389,6 @@ func (r *Result) ActivateAppProviders(ctx context.Context) {
 	}
 	r.mu.Unlock()
 	r.activateAppProviders(ctx)
-}
-
-func (r *Result) DeferSharedStartupWrites() bool {
-	if r == nil {
-		return false
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.deferSharedStartupWrites
-}
-
-// TemporalWorkersPromoted reports whether deferred Temporal worker promotion and
-// workflow-definition reconciliation have completed for this process.
-func (r *Result) TemporalWorkersPromoted() bool {
-	if r == nil {
-		return false
-	}
-	r.mu.Lock()
-	promoted := r.sharedStatePromoted
-	r.mu.Unlock()
-	return promoted
-}
-
-// PromoteTemporalWorkers flushes deferred app SHA writes, promotes Temporal
-// workers, and reconciles workflow definitions. It is idempotent and must run
-// before registry coordination is promoted.
-func (r *Result) PromoteTemporalWorkers(ctx context.Context) error {
-	if r == nil {
-		return nil
-	}
-	r.mu.Lock()
-	if r.closed {
-		r.mu.Unlock()
-		return fmt.Errorf("bootstrap result already closed")
-	}
-	alreadyPromoted := r.sharedStatePromoted
-	pending := r.pendingAppSHAs
-	workflows := append([]coreworkflow.Provider(nil), r.ExtraWorkflows...)
-	startupReconcile := r.startupWorkflowConfigReconcile
-	r.mu.Unlock()
-
-	if !alreadyPromoted {
-		if err := pending.Flush(ctx); err != nil {
-			return err
-		}
-	}
-	// Always re-run workflow provider promotion so explicit /promote/temporal can
-	// advance Temporal Worker Deployment current even when this process already
-	// completed shared startup bookkeeping.
-	if err := promoteWorkflowProviders(ctx, workflows); err != nil {
-		return err
-	}
-	if alreadyPromoted {
-		return nil
-	}
-	if startupReconcile != nil {
-		if err := startupReconcile(ctx); err != nil {
-			return err
-		}
-	}
-	r.StartWorkflowConfigReconciliation(ctx)
-
-	r.mu.Lock()
-	r.sharedStatePromoted = true
-	r.startupWorkflowConfigReconcile = nil
-	r.mu.Unlock()
-	return nil
-}
-
-// FinishSharedStartupPromotion promotes Temporal workers for explicit shared
-// startup flows. Registry coordination is promoted separately.
-func (r *Result) FinishSharedStartupPromotion(ctx context.Context) error {
-	return r.PromoteTemporalWorkers(ctx)
 }
 
 func (r *Result) WaitAppProvidersReady(ctx context.Context) error {
@@ -754,13 +677,6 @@ func (p *workflowProviderWithCleanup) WaitRuntimeWorkersReady(ctx context.Contex
 		return workerProvider.WaitRuntimeWorkersReady(ctx)
 	}
 	return nil
-}
-
-func (p *workflowProviderWithCleanup) PromoteWorkers(ctx context.Context) error {
-	if p == nil {
-		return fmt.Errorf("workflow provider is not configured")
-	}
-	return promoteDelegatedWorkflowWorkers(ctx, p.Provider)
 }
 
 type agentProviderWithTracking struct {
@@ -1554,16 +1470,9 @@ func BootstrapWithOptions(ctx context.Context, cfg *config.Config, factories *Fa
 	}()
 	storedSHAs := readAppSHAs(ctx, prepared.Services.DB)
 	autoActivate := resolveAutoActivate(cfg)
-	promoteSharedStateOnActivate := resolvePromoteSharedStateOnActivate(cfg)
-	deferSharedStartupWrites := !promoteSharedStateOnActivate
-	pendingAppSHAs := newPendingAppSHAWriter(prepared.Services.DB, deferSharedStartupWrites)
 	noopBuilds, updateBuilds := providerBuilds.partition(newAppStartupCategorizer(storedSHAs, autoActivate))
 	updateBuilds.stageServingCritical = true
 	updateBuilds.onInstalled = func(name, sha string) {
-		if deferSharedStartupWrites {
-			pendingAppSHAs.Record(name, sha)
-			return
-		}
 		if err := writeAppSHA(ctx, prepared.Services.DB, name, sha); err != nil {
 			slog.WarnContext(ctx, "persisting app sha failed", "provider", name, "error", err)
 		}
@@ -1643,11 +1552,8 @@ func BootstrapWithOptions(ctx context.Context, cfg *config.Config, factories *Fa
 		return merged
 	}
 
-	workflowConfigReconcileOpts := workflowConfigReconcileOptions{
-		allowDestructiveCleanup: !deferSharedStartupWrites,
-	}
 	reconcileWorkflowConfig := func(ctx context.Context, includeProvider workflowConfigProviderFilter) error {
-		return reconcileWorkflowConfigDefinitions(ctx, cfg, prepared.Deps.WorkflowRuntime, prepared.Deps.AppWorkflowDeclarations, includeProvider, workflowConfigReconcileOpts)
+		return reconcileWorkflowConfigDefinitions(ctx, cfg, prepared.Deps.WorkflowRuntime, prepared.Deps.AppWorkflowDeclarations, includeProvider)
 	}
 	var deferredWorkflowConfigReconcileTasks []workflowConfigReconcileTask
 	var startupWorkflowConfigReconcile func(context.Context) error
@@ -1776,8 +1682,6 @@ func BootstrapWithOptions(ctx context.Context, cfg *config.Config, factories *Fa
 		startAppProviders:              startAppProviders,
 		appProvidersInitialized:        appProvidersInitialized,
 		activateAppProviders:           activateAppProviders,
-		pendingAppSHAs:                 pendingAppSHAs,
-		deferSharedStartupWrites:       deferSharedStartupWrites,
 		startup:                        startup,
 		deferred:                       deferred,
 	}

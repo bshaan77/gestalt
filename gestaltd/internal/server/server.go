@@ -95,12 +95,11 @@ type AppRuntimeState interface {
 	WithRunningVersion(app string, fn func(version string) error) error
 }
 
-// userStore is the persisted workspace directory used to resolve human
-// identities before authorization and list users for platform admins.
+// userStore is the persisted user lookup the server needs to canonicalize
+// human identities before authorization.
 type userStore interface {
 	principal.CredentialUserResolver
 	GetUser(ctx context.Context, id string) (*core.User, error)
-	ListUsers(ctx context.Context) ([]*core.User, error)
 }
 
 // credentialUserResolver returns the user store used to canonicalize human
@@ -212,12 +211,10 @@ type Server struct {
 	scimManagedGroupIDs           map[string]struct{}
 	activateAppProviders          func(context.Context)
 	waitAppProvidersReady         func(context.Context) error
-	promoteSharedStateOnActivate  bool
-	rejectSharedStatePromotion    bool
-	finishSharedStartupPromotion  func(context.Context) error
-	temporalWorkersPromoted       func() bool
 	servingReady                  <-chan struct{}
-	uiReadiness                   *UIReadinessMonitor
+	appProviderRestarter          interface {
+		RestartApp(context.Context, string) error
+	}
 }
 
 func (s *Server) catalogSelectorConfig() invocation.CatalogSelectorConfig {
@@ -295,35 +292,19 @@ type Config struct {
 	TracerProvider                trace.TracerProvider
 	ActivateAppProviders          func(context.Context)
 	WaitAppProvidersReady         func(context.Context) error
-	PromoteSharedStateOnActivate  *bool
-	RejectSharedStatePromotion    *bool
-	FinishSharedStartupPromotion  func(context.Context) error
-	TemporalWorkersPromoted       func() bool
 	ServingReady                  <-chan struct{}
-	UIReadiness                   *UIReadinessMonitor
-	IndexedDB                     indexeddb.IndexedDB
-	RemoteManagement              proto.RemoteManagementServer
-	FrpsHandler                   http.Handler
-	FrpsConnectHandler            http.Handler
-	TunnelResolver                TunnelResolverConfig
+	AppProviderRestarter          interface {
+		RestartApp(context.Context, string) error
+	}
+	IndexedDB          indexeddb.IndexedDB
+	RemoteManagement   proto.RemoteManagementServer
+	FrpsHandler        http.Handler
+	FrpsConnectHandler http.Handler
+	TunnelResolver     TunnelResolverConfig
 	// AppAutoDeployNotify requests prompt auto-deploy reconciliation for an app.
 	AppAutoDeployNotify func(app string)
 	// AppRegistryReconcileNotify requests prompt local runtime reconciliation.
 	AppRegistryReconcileNotify func(app string)
-}
-
-func resolveServerPromoteSharedStateOnActivate(cfg Config) bool {
-	if cfg.PromoteSharedStateOnActivate != nil {
-		return *cfg.PromoteSharedStateOnActivate
-	}
-	return true
-}
-
-func resolveServerRejectSharedStatePromotion(cfg Config) bool {
-	if cfg.RejectSharedStatePromotion != nil {
-		return *cfg.RejectSharedStatePromotion
-	}
-	return false
 }
 
 func New(cfg Config) (*Server, error) {
@@ -581,12 +562,8 @@ func New(cfg Config) (*Server, error) {
 		routeProfile:                  cfg.RouteProfile,
 		activateAppProviders:          cfg.ActivateAppProviders,
 		waitAppProvidersReady:         cfg.WaitAppProvidersReady,
-		promoteSharedStateOnActivate:  resolveServerPromoteSharedStateOnActivate(cfg),
-		rejectSharedStatePromotion:    resolveServerRejectSharedStatePromotion(cfg),
-		finishSharedStartupPromotion:  cfg.FinishSharedStartupPromotion,
-		temporalWorkersPromoted:       cfg.TemporalWorkersPromoted,
 		servingReady:                  cfg.ServingReady,
-		uiReadiness:                   cfg.UIReadiness,
+		appProviderRestarter:          cfg.AppProviderRestarter,
 	}
 	s.workflowSchedules = workflowmanager.New(workflowmanager.Config{
 		Providers:         cfg.Providers,

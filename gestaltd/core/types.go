@@ -233,13 +233,9 @@ type AppVersionRecoveryObservation struct {
 }
 
 type GestaltdSourceVersionState struct {
-	CurrentSourceVersion                 string
-	MinimumHealthyInstances              int
-	UpdatedAt                            time.Time
-	TemporalWorkersPromotedSourceVersion string
-	TemporalWorkersPromotedAt            time.Time
-	AppDeployPauseOwner                  string
-	AppDeployPauseToken                  string
+	CurrentSourceVersion    string
+	MinimumHealthyInstances int
+	UpdatedAt               time.Time
 }
 
 type ExternalCredentialGrant struct {

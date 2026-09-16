@@ -19,8 +19,6 @@ const (
 )
 
 var ErrGestaltdSourceVersionUnavailable = errors.New("gestaltd source version is unavailable")
-var ErrAppDeployPaused = errors.New("app version changes are paused for a runtime deployment")
-var ErrAppDeployPauseConflict = errors.New("app deploy pause is owned by another runtime deployment")
 
 type GestaltdSourceVersionService struct {
 	db    indexeddb.IndexedDB
@@ -95,9 +93,6 @@ func (s *GestaltdSourceVersionService) CreateAppRollout(ctx context.Context, rol
 		return nil, fmt.Errorf("create source-version app rollout: load source version: %w", err)
 	}
 	state := recordToGestaltdSourceVersionState(stateRec)
-	if strings.TrimSpace(state.AppDeployPauseOwner) != "" {
-		return nil, ErrAppDeployPaused
-	}
 	current := strings.TrimSpace(state.CurrentSourceVersion)
 	if current == "" {
 		return nil, ErrGestaltdSourceVersionUnavailable
@@ -303,187 +298,19 @@ func normalizedSourceVersionTime(value time.Time) time.Time {
 	return value.UTC().Truncate(time.Millisecond)
 }
 
-func (s *GestaltdSourceVersionService) AcquireAppDeployPause(
-	ctx context.Context,
-	owner string,
-	token string,
-) (*core.GestaltdSourceVersionState, error) {
-	return s.changeAppDeployPause(ctx, owner, token, true)
-}
-
-func (s *GestaltdSourceVersionService) ReleaseAppDeployPause(
-	ctx context.Context,
-	owner string,
-	token string,
-) (*core.GestaltdSourceVersionState, error) {
-	return s.changeAppDeployPause(ctx, owner, token, false)
-}
-
-func (s *GestaltdSourceVersionService) changeAppDeployPause(
-	ctx context.Context,
-	owner string,
-	token string,
-	acquire bool,
-) (*core.GestaltdSourceVersionState, error) {
-	owner = strings.TrimSpace(owner)
-	token = strings.TrimSpace(token)
-	action := "release"
-	if acquire {
-		action = "acquire"
-	}
-	if owner == "" || token == "" {
-		return nil, fmt.Errorf("%s app deploy pause: owner and token are required", action)
-	}
-	if s == nil || s.db == nil {
-		return nil, fmt.Errorf("%s app deploy pause: service is not configured", action)
-	}
-	tx, err := s.db.Transaction(
-		ctx,
-		[]string{StoreGestaltdSourceVersionState},
-		idb.TransactionReadwrite,
-		idb.TransactionOptions{},
-	)
-	if err != nil {
-		return nil, fmt.Errorf("%s app deploy pause: begin transaction: %w", action, err)
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = tx.Abort(context.WithoutCancel(ctx))
-		}
-	}()
-	store := tx.ObjectStore(StoreGestaltdSourceVersionState)
-	rec, err := store.Get(ctx, gestaltdSourceVersionStateID)
-	if err != nil {
-		if errors.Is(err, idb.ErrNotFound) {
-			return nil, ErrGestaltdSourceVersionUnavailable
-		}
-		return nil, fmt.Errorf("%s app deploy pause: load state: %w", action, err)
-	}
-	state := recordToGestaltdSourceVersionState(rec)
-	if state.AppDeployPauseOwner != "" &&
-		(state.AppDeployPauseOwner != owner || state.AppDeployPauseToken != token) {
-		return nil, ErrAppDeployPauseConflict
-	}
-	if acquire {
-		state.AppDeployPauseOwner = owner
-		state.AppDeployPauseToken = token
-	} else {
-		state.AppDeployPauseOwner = ""
-		state.AppDeployPauseToken = ""
-	}
-	if err := store.Put(ctx, gestaltdSourceVersionStateRecord(state)); err != nil {
-		return nil, fmt.Errorf("%s app deploy pause: write state: %w", action, err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("%s app deploy pause: commit: %w", action, err)
-	}
-	committed = true
-	return state, nil
-}
-
 func gestaltdSourceVersionStateRecord(state *core.GestaltdSourceVersionState) idb.Record {
 	return idb.Record{
 		"id":                        gestaltdSourceVersionStateID,
 		"current_source_version":    strings.TrimSpace(state.CurrentSourceVersion),
 		"minimum_healthy_instances": state.MinimumHealthyInstances,
 		"updated_at":                normalizedSourceVersionTime(state.UpdatedAt),
-		"temporal_workers_promoted_source_version": strings.TrimSpace(state.TemporalWorkersPromotedSourceVersion),
-		"temporal_workers_promoted_at":             normalizedSourceVersionTime(state.TemporalWorkersPromotedAt),
-		"app_deploy_pause_owner":                   strings.TrimSpace(state.AppDeployPauseOwner),
-		"app_deploy_pause_token":                   strings.TrimSpace(state.AppDeployPauseToken),
 	}
 }
 
 func recordToGestaltdSourceVersionState(rec idb.Record) *core.GestaltdSourceVersionState {
 	return &core.GestaltdSourceVersionState{
-		CurrentSourceVersion:                 recString(rec, "current_source_version"),
-		MinimumHealthyInstances:              recordInt(rec, "minimum_healthy_instances"),
-		UpdatedAt:                            recTime(rec, "updated_at"),
-		TemporalWorkersPromotedSourceVersion: recString(rec, "temporal_workers_promoted_source_version"),
-		TemporalWorkersPromotedAt:            recTime(rec, "temporal_workers_promoted_at"),
-		AppDeployPauseOwner:                  recString(rec, "app_deploy_pause_owner"),
-		AppDeployPauseToken:                  recString(rec, "app_deploy_pause_token"),
+		CurrentSourceVersion:    recString(rec, "current_source_version"),
+		MinimumHealthyInstances: recordInt(rec, "minimum_healthy_instances"),
+		UpdatedAt:               recTime(rec, "updated_at"),
 	}
-}
-
-func (s *GestaltdSourceVersionService) TemporalWorkersPromotedForSourceVersion(
-	ctx context.Context,
-	sourceVersion string,
-) (bool, error) {
-	if s == nil {
-		return false, fmt.Errorf("temporal workers promoted: service is not configured")
-	}
-	sourceVersion = strings.TrimSpace(sourceVersion)
-	if sourceVersion == "" {
-		return false, fmt.Errorf("temporal workers promoted: source version is required")
-	}
-	state, err := s.Get(ctx)
-	if err != nil {
-		if errors.Is(err, core.ErrNotFound) {
-			return false, nil
-		}
-		return false, fmt.Errorf("temporal workers promoted: load state: %w", err)
-	}
-	return strings.TrimSpace(state.TemporalWorkersPromotedSourceVersion) == sourceVersion &&
-		!state.TemporalWorkersPromotedAt.IsZero(), nil
-}
-
-func (s *GestaltdSourceVersionService) MarkTemporalWorkersPromoted(
-	ctx context.Context,
-	sourceVersion string,
-	at time.Time,
-) (*core.GestaltdSourceVersionState, error) {
-	if s == nil || s.db == nil {
-		return nil, fmt.Errorf("mark temporal workers promoted: service is not configured")
-	}
-	sourceVersion = strings.TrimSpace(sourceVersion)
-	if sourceVersion == "" {
-		return nil, fmt.Errorf("mark temporal workers promoted: source version is required")
-	}
-	at = normalizedSourceVersionTime(at)
-
-	tx, err := s.db.Transaction(
-		ctx,
-		[]string{StoreGestaltdSourceVersionState},
-		idb.TransactionReadwrite,
-		idb.TransactionOptions{},
-	)
-	if err != nil {
-		return nil, fmt.Errorf("mark temporal workers promoted: begin transaction: %w", err)
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = tx.Abort(context.WithoutCancel(ctx))
-		}
-	}()
-
-	stateStore := tx.ObjectStore(StoreGestaltdSourceVersionState)
-	state := &core.GestaltdSourceVersionState{}
-	stateRecs, getErr := stateStore.GetAll(ctx, gestaltdSourceVersionStateID, 1)
-	if getErr != nil {
-		return nil, fmt.Errorf("mark temporal workers promoted: load state: %w", getErr)
-	}
-	if len(stateRecs) > 0 {
-		state = recordToGestaltdSourceVersionState(stateRecs[0])
-	}
-	if strings.TrimSpace(state.TemporalWorkersPromotedSourceVersion) == sourceVersion &&
-		!state.TemporalWorkersPromotedAt.IsZero() {
-		if err := tx.Commit(ctx); err != nil {
-			return nil, fmt.Errorf("mark temporal workers promoted: commit: %w", err)
-		}
-		committed = true
-		return state, nil
-	}
-	state.TemporalWorkersPromotedSourceVersion = sourceVersion
-	state.TemporalWorkersPromotedAt = at
-	if err := stateStore.Put(ctx, gestaltdSourceVersionStateRecord(state)); err != nil {
-		return nil, fmt.Errorf("mark temporal workers promoted: write state: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("mark temporal workers promoted: commit: %w", err)
-	}
-	committed = true
-	return state, nil
 }

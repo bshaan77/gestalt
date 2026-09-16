@@ -228,12 +228,6 @@ func (s *Server) readinessCheck(w http.ResponseWriter, _ *http.Request) {
 			return
 		}
 	}
-	if s.uiReadiness != nil {
-		if reason := s.uiReadiness.ReadinessReason(); reason != "" {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": reason})
-			return
-		}
-	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -496,14 +490,6 @@ func (s *Server) disconnectIntegration(w http.ResponseWriter, r *http.Request) {
 	}
 
 	disconnected := groups[0].members[0]
-	if requestedInstance != "" {
-		for _, member := range groups[0].members {
-			if member.credential.Qualifier == requestedInstance {
-				disconnected = member
-				break
-			}
-		}
-	}
 	tokenID := disconnected.credential.ID
 	auditTarget = connectionAuditTarget(name, disconnected.connection, disconnected.credential.Qualifier)
 	if tokenID == "" {
