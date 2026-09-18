@@ -13,6 +13,7 @@ import (
 	"github.com/valon-technologies/gestalt/server/core"
 	"github.com/valon-technologies/gestalt/server/core/catalog"
 	coretesting "github.com/valon-technologies/gestalt/server/core/testing"
+	"github.com/valon-technologies/gestalt/server/internal/publicrpc"
 	"github.com/valon-technologies/gestalt/server/internal/testutil"
 	proto "github.com/valon-technologies/gestalt/server/rpc/protov1/v1"
 	"github.com/valon-technologies/gestalt/server/services/apps/apiexec"
@@ -121,6 +122,7 @@ func TestBrokerInvokeEnforcesPublicOperationSurfaces(t *testing.T) {
 	t.Parallel()
 
 	disabled := false
+	enabled := true
 	tests := []struct {
 		name        string
 		surface     InvocationSurface
@@ -133,6 +135,7 @@ func TestBrokerInvokeEnforcesPublicOperationSurfaces(t *testing.T) {
 		{name: "MCP disabled", surface: InvocationSurfaceMCP, op: catalog.CatalogOperation{ID: "mutate", MCP: &disabled}, wantDenied: true},
 		{name: "nested app call remains available", surface: InvocationSurfaceHTTP, caller: CallerProvider{Kind: ProviderKindApp, Name: "caller"}, op: catalog.CatalogOperation{ID: "mutate", API: &disabled, MCP: &disabled}, wantExecute: true},
 		{name: "nested workflow call remains available", surface: InvocationSurfaceHTTP, caller: CallerProvider{Kind: ProviderKindWorkflow, Name: "caller"}, op: catalog.CatalogOperation{ID: "mutate", API: &disabled, MCP: &disabled}, wantExecute: true},
+		{name: "agent public operation remains available", surface: InvocationSurfaceHTTP, caller: CallerProvider{Kind: ProviderKindAgent, Name: "assistant"}, op: catalog.CatalogOperation{ID: "mutate", API: &enabled}, wantExecute: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -151,7 +154,12 @@ func TestBrokerInvokeEnforcesPublicOperationSurfaces(t *testing.T) {
 					return &core.OperationResult{Status: http.StatusOK}, nil
 				},
 			}
-			broker := NewBroker(testutil.NewProviderRegistry(t, provider), nil, nil)
+			broker := NewBroker(
+				testutil.NewProviderRegistry(t, provider),
+				nil,
+				nil,
+				WithAuthorizationProvider(&recordingAuthorizationProvider{allowed: true}),
+			)
 			ctx := WithInvocationSurface(context.Background(), tt.surface)
 			if tt.caller != (CallerProvider{}) {
 				ctx = WithCallerProvider(ctx, tt.caller.Kind, tt.caller.Name)
@@ -168,6 +176,185 @@ func TestBrokerInvokeEnforcesPublicOperationSurfaces(t *testing.T) {
 				t.Fatalf("executed = %v, want %v", executed, tt.wantExecute)
 			}
 		})
+	}
+}
+
+func TestBrokerInvokePrivateOperationRequiresUserAndCallerGrants(t *testing.T) {
+	t.Parallel()
+
+	disabled := false
+	operation := catalog.CatalogOperation{
+		ID:           "mutate",
+		API:          &disabled,
+		MCP:          &disabled,
+		AllowedRoles: []string{"editor"},
+	}
+	tests := []struct {
+		name    string
+		caller  CallerProvider
+		public  bool
+		authz   core.AuthorizationProvider
+		wantErr error
+		wantRun bool
+	}{
+		{
+			name:   "dashboard app and user grants",
+			caller: CallerProvider{Kind: ProviderKindApp, Name: "dashboard"},
+			authz: &batchAuthorizationProvider{allow: map[string][]string{
+				"user:test|mutate":     {"editor"},
+				"app:dashboard|mutate": {"editor"},
+			}},
+			wantRun: true,
+		},
+		{
+			name:   "wrong app denied",
+			caller: CallerProvider{Kind: ProviderKindApp, Name: "other"},
+			authz: &batchAuthorizationProvider{allow: map[string][]string{
+				"user:test|mutate": {"editor"},
+			}},
+			wantErr: ErrAuthorizationDenied,
+		},
+		{
+			name:   "workflow denied without grant",
+			caller: CallerProvider{Kind: ProviderKindWorkflow, Name: "nightly"},
+			authz: &batchAuthorizationProvider{allow: map[string][]string{
+				"user:test|mutate": {"editor"},
+			}},
+			wantErr: ErrAuthorizationDenied,
+		},
+		{
+			name:    "missing caller denied",
+			authz:   &batchAuthorizationProvider{allow: map[string][]string{"user:test|mutate": {"editor"}}},
+			wantErr: ErrOperationNotFound,
+		},
+		{
+			name:   "public gateway denied despite inherited caller",
+			caller: CallerProvider{Kind: ProviderKindApp, Name: "dashboard"},
+			public: true,
+			authz: &batchAuthorizationProvider{allow: map[string][]string{
+				"user:test|mutate":     {"editor"},
+				"app:dashboard|mutate": {"editor"},
+			}},
+			wantErr: ErrOperationNotFound,
+		},
+		{
+			name:    "authorization unavailable",
+			caller:  CallerProvider{Kind: ProviderKindApp, Name: "dashboard"},
+			wantErr: ErrAuthorizationUnavailable,
+		},
+		{
+			name:   "authorization error denies",
+			caller: CallerProvider{Kind: ProviderKindApp, Name: "dashboard"},
+			authz: &batchAuthorizationProvider{
+				checkAccessErr: errors.New("evaluator offline"),
+			},
+			wantErr: ErrAuthorizationDenied,
+		},
+		{
+			name:   "user grant required",
+			caller: CallerProvider{Kind: ProviderKindApp, Name: "dashboard"},
+			authz: &batchAuthorizationProvider{allow: map[string][]string{
+				"app:dashboard|mutate": {"editor"},
+			}},
+			wantErr: ErrAuthorizationDenied,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			executed := false
+			provider := &coretesting.StubIntegration{
+				N: "example",
+				CatalogVal: &catalog.Catalog{
+					Name:       "example",
+					Operations: []catalog.CatalogOperation{operation},
+				},
+				ConnMode: core.ConnectionModeNone,
+				ExecuteFn: func(context.Context, string, map[string]any, string) (*core.OperationResult, error) {
+					executed = true
+					return &core.OperationResult{Status: http.StatusOK}, nil
+				},
+			}
+			broker := NewBroker(
+				testutil.NewProviderRegistry(t, provider),
+				nil,
+				nil,
+				WithAuthorizationProvider(tt.authz),
+			)
+			ctx := WithInvocationSurface(context.Background(), InvocationSurfaceHTTP)
+			if tt.public {
+				ctx = publicrpc.WithPublicOrigin(ctx, proto.App_Invoke_FullMethodName)
+			}
+			if tt.caller.Name != "" {
+				ctx = WithCallerProvider(ctx, tt.caller.Kind, tt.caller.Name)
+			}
+			_, err := broker.Invoke(ctx, &principal.Principal{SubjectID: "user:test", Kind: principal.KindUser}, "example", "", operation.ID, nil)
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("Invoke error = %v, want %v", err, tt.wantErr)
+				}
+			} else if err != nil {
+				t.Fatalf("Invoke: %v", err)
+			}
+			if executed != tt.wantRun {
+				t.Fatalf("executed = %v, want %v", executed, tt.wantRun)
+			}
+		})
+	}
+}
+
+func TestBrokerInvokeGraphQLPrivateOperationRequiresUserAndCallerGrants(t *testing.T) {
+	t.Parallel()
+
+	disabled := false
+	provider := &brokerGraphQLProvider{StubIntegration: &coretesting.StubIntegration{
+		N:        "example",
+		ConnMode: core.ConnectionModeNone,
+		CatalogVal: &catalog.Catalog{Name: "example", Operations: []catalog.CatalogOperation{{
+			ID:            "private.viewer",
+			Transport:     "graphql",
+			Query:         "query Viewer { viewer }",
+			OperationName: "Viewer",
+			API:           &disabled,
+			MCP:           &disabled,
+			AllowedRoles:  []string{"editor"},
+		}}},
+	}}
+	authz := &batchAuthorizationProvider{allow: map[string][]string{
+		"user:test|private.viewer":     {"editor"},
+		"app:dashboard|private.viewer": {"editor"},
+		"user:test|graphql":            {"editor"},
+	}}
+	broker := NewBroker(testutil.NewProviderRegistry(t, provider), nil, nil, WithAuthorizationProvider(authz))
+	request := GraphQLRequest{
+		Document:      "query Renamed { ...ViewerFields } fragment ViewerFields on Query { alias: viewer }",
+		OperationName: "Renamed",
+	}
+	ctx := WithCallerProvider(context.Background(), ProviderKindApp, "dashboard")
+	if _, err := broker.InvokeGraphQL(ctx, &principal.Principal{SubjectID: "user:test", Kind: principal.KindUser}, "example", "", request); err != nil {
+		t.Fatalf("authorized GraphQL invoke: %v", err)
+	}
+
+	noUserAuthz := &batchAuthorizationProvider{allow: map[string][]string{
+		"app:dashboard|private.viewer": {"editor"},
+		"user:test|graphql":            {"editor"},
+	}}
+	noUserBroker := NewBroker(testutil.NewProviderRegistry(t, provider), nil, nil, WithAuthorizationProvider(noUserAuthz))
+	if _, err := noUserBroker.InvokeGraphQL(ctx, &principal.Principal{SubjectID: "user:test", Kind: principal.KindUser}, "example", "", request); !errors.Is(err, ErrAuthorizationDenied) {
+		t.Fatalf("missing user grant error = %v, want ErrAuthorizationDenied", err)
+	}
+
+	wrong := WithCallerProvider(context.Background(), ProviderKindApp, "other")
+	if _, err := broker.InvokeGraphQL(wrong, &principal.Principal{SubjectID: "user:test", Kind: principal.KindUser}, "example", "", request); !errors.Is(err, ErrAuthorizationDenied) {
+		t.Fatalf("wrong caller error = %v, want ErrAuthorizationDenied", err)
+	}
+	if _, err := broker.InvokeGraphQL(context.Background(), &principal.Principal{SubjectID: "user:test", Kind: principal.KindUser}, "example", "", request); !errors.Is(err, ErrAuthorizationDenied) {
+		t.Fatalf("missing caller error = %v, want ErrAuthorizationDenied", err)
+	}
+	public := publicrpc.WithPublicOrigin(WithInvocationSurface(context.Background(), InvocationSurfaceHTTP), proto.App_Invoke_FullMethodName)
+	public = WithCallerProvider(public, ProviderKindApp, "dashboard")
+	if _, err := broker.InvokeGraphQL(public, &principal.Principal{SubjectID: "user:test", Kind: principal.KindUser}, "example", "", request); !errors.Is(err, ErrOperationNotFound) {
+		t.Fatalf("public GraphQL error = %v, want ErrOperationNotFound", err)
 	}
 }
 

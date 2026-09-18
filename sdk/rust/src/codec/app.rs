@@ -133,6 +133,8 @@ pub(crate) fn from_wire_catalog_operation(value: v1::CatalogOperation) -> Catalo
         transport: value.transport,
         allowed_roles: value.allowed_roles,
         response: value.response.map(from_wire_operation_response_spec),
+        api: value.api,
+        mcp: value.mcp,
     }
 }
 

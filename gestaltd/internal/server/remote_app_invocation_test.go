@@ -50,9 +50,13 @@ func (p *publicRemoteInvocationProvider) CredentialFields() []core.CredentialFie
 func (p *publicRemoteInvocationProvider) DiscoveryConfig() *core.DiscoveryConfig      { return nil }
 func (p *publicRemoteInvocationProvider) ConnectionForOperation(string) string        { return "" }
 func (p *publicRemoteInvocationProvider) Catalog() *catalog.Catalog {
+	apiHidden := false
 	return &catalog.Catalog{
-		Name:       "data-schema-explorer",
-		Operations: []catalog.CatalogOperation{{ID: "get_schema", Transport: catalog.TransportApp}},
+		Name: "data-schema-explorer",
+		Operations: []catalog.CatalogOperation{
+			{ID: "get_schema", Transport: catalog.TransportApp},
+			{ID: "public_hidden", Transport: catalog.TransportApp, API: &apiHidden},
+		},
 	}
 }
 
@@ -137,6 +141,7 @@ func TestDevRemoteAppInvocationUsesPublicGatewayContextAndAllowlist(t *testing.T
 	remoteClient := proto.NewAppClient(remoteConn)
 
 	localRegistry := registry.New()
+	apiHidden := false
 	remoteProviderProxy := appservice.NewGestaltRemote(remoteClient, appservice.StaticProviderSpec{
 		Name: "data-schema-explorer",
 		Catalog: &catalog.Catalog{
@@ -144,6 +149,7 @@ func TestDevRemoteAppInvocationUsesPublicGatewayContextAndAllowlist(t *testing.T
 			Operations: []catalog.CatalogOperation{
 				{ID: "get_schema", Transport: catalog.TransportApp},
 				{ID: "graphql", Transport: catalog.TransportApp},
+				{ID: "public_hidden", Transport: catalog.TransportApp, API: &apiHidden},
 			},
 		},
 		ConnectionMode: core.ConnectionModeNone,
@@ -179,6 +185,21 @@ func TestDevRemoteAppInvocationUsesPublicGatewayContextAndAllowlist(t *testing.T
 	if response.GetStatus() != 200 || string(response.GetBody()) != `{"schema":"current"}` {
 		t.Fatalf("local response = %+v, want current schema", response)
 	}
+	_, err = localClient.Invoke(context.Background(), &proto.AppInvokeRequest{
+		App:       "data-schema-explorer",
+		Operation: "public_hidden",
+		Context:   requestContext,
+	})
+	if status.Code(err) != codes.NotFound {
+		t.Fatalf("private operation through public remote error = %v, want NotFound", err)
+	}
+	_, err = remoteClient.Invoke(context.Background(), &proto.AppInvokeRequest{
+		App:       "data-schema-explorer",
+		Operation: "public_hidden",
+	})
+	if status.Code(err) != codes.NotFound {
+		t.Fatalf("public remote private operation error = %v, want NotFound", err)
+	}
 
 	graphqlResponse, err := localClient.InvokeGraphQL(context.Background(), &proto.AppInvokeGraphQLRequest{
 		App:      "data-schema-explorer",
@@ -210,8 +231,8 @@ func TestDevRemoteAppInvocationUsesPublicGatewayContextAndAllowlist(t *testing.T
 	if _, err := emptyRemote.(core.GraphQLSurfaceInvoker).InvokeGraphQL(context.Background(), core.GraphQLRequest{Document: "query Schema { schema }"}, ""); !errors.Is(err, invocation.ErrOperationNotFound) {
 		t.Fatalf("empty-catalog GraphQL error = %v, want ErrOperationNotFound", err)
 	}
-	if ordinaryRequestWithoutContext.Load() != 1 || graphQLRequestWithoutContext.Load() != 1 {
-		t.Fatalf("outbound request context counts = ordinary %d graphql %d, want 1 each", ordinaryRequestWithoutContext.Load(), graphQLRequestWithoutContext.Load())
+	if ordinaryRequestWithoutContext.Load() != 3 || graphQLRequestWithoutContext.Load() != 1 {
+		t.Fatalf("outbound request context counts = ordinary %d graphql %d, want 3 ordinary and 1 graphql", ordinaryRequestWithoutContext.Load(), graphQLRequestWithoutContext.Load())
 	}
 	invokeCalls, graphQLCalls, subject, caller := remoteProvider.snapshot()
 	if invokeCalls != 1 || graphQLCalls != 1 {

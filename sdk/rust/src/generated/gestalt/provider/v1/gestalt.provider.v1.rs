@@ -164,6 +164,12 @@ pub struct CatalogOperation {
     /// output_schema string; absent is equivalent to unary with no schema.
     #[prost(message, optional, tag = "15")]
     pub response: ::core::option::Option<OperationResponseSpec>,
+    /// Public API exposure override. Absent means exposed by default.
+    #[prost(bool, optional, tag = "16")]
+    pub api: ::core::option::Option<bool>,
+    /// Public MCP exposure override. Absent means exposed by default.
+    #[prost(bool, optional, tag = "17")]
+    pub mcp: ::core::option::Option<bool>,
 }
 /// Catalog is the static or request-scoped executable surface exposed by a
 /// provider.
@@ -3120,6 +3126,13 @@ pub struct HealthCheckResponse {
 /// serving after the optional runtime start phase.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct StartRuntimeProviderResponse {
+    #[prost(int32, tag = "1")]
+    pub protocol_version: i32,
+}
+/// PromoteWorkersResponse confirms the protocol version the provider is serving
+/// after explicit worker promotion completes.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PromoteWorkersResponse {
     #[prost(int32, tag = "1")]
     pub protocol_version: i32,
 }

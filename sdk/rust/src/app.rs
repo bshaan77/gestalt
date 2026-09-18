@@ -191,6 +191,14 @@ pub struct CatalogOperation {
     ///
     /// The `response` field; None when unset.
     pub response: Option<OperationResponseSpec>,
+    /// Public API exposure override. Absent means exposed by default.
+    ///
+    /// The `api` field; None when unset.
+    pub api: Option<bool>,
+    /// Public MCP exposure override. Absent means exposed by default.
+    ///
+    /// The `mcp` field; None when unset.
+    pub mcp: Option<bool>,
 }
 
 /// CatalogParameter describes one input parameter surfaced in the generated

@@ -55,6 +55,10 @@ pub struct CatalogOperation {
     pub transport: String,
     /// The `allowed_roles` field.
     pub allowed_roles: Vec<String>,
+    /// Public API exposure override. Absent means exposed by default.
+    pub api: Option<bool>,
+    /// Public MCP exposure override. Absent means exposed by default.
+    pub mcp: Option<bool>,
 }
 
 /// One input parameter surfaced in a generated catalog operation.
@@ -263,6 +267,8 @@ fn operation_to_proto(operation: &CatalogOperation) -> v1::CatalogOperation {
         visible: operation.visible,
         transport: operation.transport.clone(),
         allowed_roles: operation.allowed_roles.clone(),
+        api: operation.api,
+        mcp: operation.mcp,
     }
 }
 

@@ -111,6 +111,15 @@ Each operation is exposed to the public API and MCP by default. Add
 flags affect both catalog discovery and direct invocation; calls from another
 app through the host service remain available.
 
+When both flags are explicitly `false`, the operation is private. Public
+ingress is rejected, and an internal invocation must be allowed separately for
+the original user and the verified caller provider by the existing
+`AuthorizationProvider`. The caller is checked as the `kind:name` subject
+(for example, `app:data-platform-dashboard`), and `allowedRoles` is applied to
+each decision; it is not a caller-authorization bypass. Caller identity is
+trusted only across host-managed provider hops, so a request routed through
+another Gestalt deployment's public API fails closed.
+
 ### `allowedHosts`
 
 <ActiveDevelopmentCallout><code>allowedHosts</code></ActiveDevelopmentCallout>

@@ -120,6 +120,13 @@ func prepareProviderBuilds(
 			builds.pending = append(builds.pending, pendingProviderBuild{name: name, entry: entry, sha: sha})
 			continue
 		}
+		spec.Catalog, err = applyAllowedOperationsCatalog(name, entry.EffectiveAllowedOperations(), spec.Catalog)
+		if err != nil {
+			builds.errs = append(builds.errs, err)
+			builds.pending = append(builds.pending, pendingProviderBuild{name: name, entry: entry, sha: sha})
+			continue
+		}
+		remapStartupOperationRouting(&operationRouting, entry.EffectiveAllowedOperations())
 		var tracker *startupWaitTracker
 		if deps.WorkflowRuntime != nil {
 			tracker = deps.WorkflowRuntime.StartupWaitTracker()
@@ -134,6 +141,20 @@ func prepareProviderBuilds(
 		builds.pending = append(builds.pending, pendingProviderBuild{name: name, entry: entry, proxy: proxy, sha: sha})
 	}
 	return builds, nil
+}
+
+func remapStartupOperationRouting(routing *startupOperationRouting, allowed map[string]*config.OperationOverride) {
+	if routing == nil || len(routing.connections) == 0 {
+		return
+	}
+	for original, override := range allowed {
+		if override == nil || strings.TrimSpace(override.Alias) == "" {
+			continue
+		}
+		if connection := routing.connections[original]; connection != "" {
+			routing.connections[override.Alias] = connection
+		}
+	}
 }
 
 func registerRemoteApps(providers *registry.ProviderMap[core.Provider], cfg *config.Config, deps Deps) error {
@@ -516,6 +537,9 @@ func validateProviderConnectionMode(provider string, mode core.ConnectionMode) e
 
 func BuildStartupProviderSpec(name string, entry *config.ProviderEntry) (appservice.StaticProviderSpec, map[string]string, error) {
 	spec, routing, err := buildStartupProviderSpec(name, entry)
+	if err == nil {
+		spec.Catalog, err = applyAllowedOperationsCatalog(name, entry.EffectiveAllowedOperations(), spec.Catalog)
+	}
 	return spec, routing.connections, err
 }
 
@@ -1178,6 +1202,21 @@ func applyAllowedOperations(name string, allowedOperations map[string]*config.Op
 		return nil, fmt.Errorf("integration %q plugin: %w", name, err)
 	}
 	return policy.Wrap(pluginProv), nil
+}
+
+func applyAllowedOperationsCatalog(name string, allowedOperations map[string]*config.OperationOverride, cat *catalog.Catalog) (*catalog.Catalog, error) {
+	if cat == nil {
+		return nil, nil
+	}
+	matched := operationexposure.MatchingAllowedOperations(allowedOperations, cat)
+	if matched == nil {
+		return cat.Clone(), nil
+	}
+	policy, err := operationexposure.New(matched)
+	if err != nil {
+		return nil, fmt.Errorf("integration %q startup catalog: %w", name, err)
+	}
+	return policy.ApplyCatalog(cat), nil
 }
 
 func catalogOperationCount(cat *catalog.Catalog) int {

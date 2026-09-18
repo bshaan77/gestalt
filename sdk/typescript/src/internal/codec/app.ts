@@ -238,6 +238,8 @@ export function toWireCatalogOperation(
     ...(value.response !== undefined
       ? { response: toWireOperationResponseSpec(value.response) }
       : {}),
+    ...(value.api !== undefined ? { api: value.api } : {}),
+    ...(value.mcp !== undefined ? { mcp: value.mcp } : {}),
   });
 }
 
@@ -263,6 +265,8 @@ export function fromWireCatalogOperation(
     ...(value.response !== undefined
       ? { response: fromWireOperationResponseSpec(value.response) }
       : {}),
+    ...(value.api !== undefined ? { api: value.api } : {}),
+    ...(value.mcp !== undefined ? { mcp: value.mcp } : {}),
   };
 }
 

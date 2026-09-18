@@ -36,6 +36,8 @@ func catalogFromProto(src *proto.Catalog) (*catalog.Catalog, error) {
 			Tags:           op.GetTags(),
 			ReadOnly:       op.GetReadOnly(),
 			Visible:        op.Visible,
+			API:            op.Api,
+			MCP:            op.Mcp,
 			Transport:      op.GetTransport(),
 		}
 		if ann := op.GetAnnotations(); ann != nil {
@@ -88,6 +90,8 @@ func catalogToProto(cat *catalog.Catalog) *proto.Catalog {
 			Tags:           op.Tags,
 			ReadOnly:       op.ReadOnly,
 			Visible:        op.Visible,
+			Api:            op.API,
+			Mcp:            op.MCP,
 			Transport:      op.Transport,
 		}
 		ann := op.Annotations

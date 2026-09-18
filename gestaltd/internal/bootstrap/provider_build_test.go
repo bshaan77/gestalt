@@ -761,6 +761,10 @@ func localRoutingAppStub(name string) *coretesting.StubIntegration {
 }
 
 func newRemoteRoutingBroker(t *testing.T, cfg *config.Config, remoteClients map[string]proto.AppClient, localApps ...core.Provider) *invocation.Broker {
+	return newRemoteRoutingBrokerWithOptions(t, cfg, remoteClients, nil, localApps...)
+}
+
+func newRemoteRoutingBrokerWithOptions(t *testing.T, cfg *config.Config, remoteClients map[string]proto.AppClient, opts []invocation.BrokerOption, localApps ...core.Provider) *invocation.Broker {
 	t.Helper()
 	reg := registry.New()
 	for _, provider := range localApps {
@@ -776,7 +780,7 @@ func newRemoteRoutingBroker(t *testing.T, cfg *config.Config, remoteClients map[
 		t.Fatalf("registerRemoteApps: %v", err)
 	}
 	svc := testutil.NewStubServices(t)
-	return invocation.NewBroker(&reg.Providers, svc.Users, svc.ExternalCredentials)
+	return invocation.NewBroker(&reg.Providers, svc.Users, svc.ExternalCredentials, opts...)
 }
 
 func remoteRoutingPrincipal(scopes ...string) *principal.Principal {
@@ -1070,8 +1074,9 @@ func TestRemoteRegistryAppRoutingUsesAllowlistAndConfiguredRemote(t *testing.T) 
 	}
 
 	services := testutil.NewStubServices(t)
-	broker := invocation.NewBroker(&reg.Providers, services.Users, services.ExternalCredentials)
-	if _, err := broker.Invoke(context.Background(), remoteRoutingPrincipal(), "data-schema-explorer", "", "get_schema", nil); err != nil {
+	broker := invocation.NewBroker(&reg.Providers, services.Users, services.ExternalCredentials, invocation.WithAuthorizationProvider(newAllowAllAuthorizationProvider()))
+	internalContext := invocation.WithCallerProvider(context.Background(), invocation.ProviderKindApp, "data-platform-dashboard")
+	if _, err := broker.Invoke(internalContext, remoteRoutingPrincipal(), "data-schema-explorer", "", "get_schema", nil); err != nil {
 		t.Fatalf("allowlisted Invoke: %v", err)
 	}
 	if _, err := broker.Invoke(context.Background(), remoteRoutingPrincipal(), "other-registry-app", "", "ping", nil); err != nil {
@@ -1112,8 +1117,9 @@ func TestRemoteAppRoutingAppliesOperationSurfaceOverrides(t *testing.T) {
 		Apps: map[string]*config.ProviderEntry{"remote-app": entry},
 	}
 	client := &recordingRemoteAppClient{}
-	broker := newRemoteRoutingBroker(t, cfg, map[string]proto.AppClient{config.DefaultRemoteName: client})
-	if _, err := broker.Invoke(context.Background(), remoteRoutingPrincipal(), "remote-app", "", "read", nil); err != nil {
+	broker := newRemoteRoutingBrokerWithOptions(t, cfg, map[string]proto.AppClient{config.DefaultRemoteName: client}, []invocation.BrokerOption{invocation.WithAuthorizationProvider(newAllowAllAuthorizationProvider())})
+	internalContext := invocation.WithCallerProvider(context.Background(), invocation.ProviderKindApp, "data-platform-dashboard")
+	if _, err := broker.Invoke(internalContext, remoteRoutingPrincipal(), "remote-app", "", "read", nil); err != nil {
 		t.Fatalf("internal Invoke: %v", err)
 	}
 	for _, surface := range []invocation.InvocationSurface{invocation.InvocationSurfaceHTTP, invocation.InvocationSurfaceMCP} {
@@ -1125,6 +1131,44 @@ func TestRemoteAppRoutingAppliesOperationSurfaceOverrides(t *testing.T) {
 	calls := client.snapshot()
 	if len(calls) != 1 || calls[0].operation != "read" {
 		t.Fatalf("remote calls = %#v, want one internal read call", calls)
+	}
+}
+
+func TestRemoteAppPlacementAppliesAllowedOperationAliasOnce(t *testing.T) {
+	t.Parallel()
+
+	entry := remoteRoutingAppEntry(t, "remote-app", "read")
+	entry.Remote = config.DefaultRemoteName
+	entry.AllowedOperations = map[string]*config.OperationOverride{
+		"read": {Alias: "read.alias"},
+	}
+	cfg := &config.Config{
+		Server: config.ServerConfig{Remotes: map[string]*config.RemoteConfig{
+			config.DefaultRemoteName: {URL: "https://remote.test", Token: "remote-token", Default: true},
+		}},
+		Apps: map[string]*config.ProviderEntry{"remote-app": entry},
+	}
+	client := &recordingRemoteAppClient{}
+	reg := registry.New()
+	if err := registerRemoteApps(&reg.Providers, cfg, Deps{RemoteClientSets: remote.ClientSets{config.DefaultRemoteName: {App: client}}}); err != nil {
+		t.Fatalf("registerRemoteApps: %v", err)
+	}
+	provider, err := reg.Providers.Get("remote-app")
+	if err != nil {
+		t.Fatalf("get remote provider: %v", err)
+	}
+	cat := provider.Catalog()
+	if cat == nil || len(cat.Operations) != 1 || cat.Operations[0].ID != "read.alias" {
+		t.Fatalf("remote catalog = %+v, want one aliased operation", cat)
+	}
+	services := testutil.NewStubServices(t)
+	broker := invocation.NewBroker(&reg.Providers, services.Users, services.ExternalCredentials)
+	if _, err := broker.Invoke(context.Background(), remoteRoutingPrincipal(), "remote-app", "", "read.alias", nil); err != nil {
+		t.Fatalf("Invoke aliased remote operation: %v", err)
+	}
+	calls := client.snapshot()
+	if len(calls) != 1 || calls[0].operation != "read" {
+		t.Fatalf("remote calls = %#v, want one call to original read operation", calls)
 	}
 }
 

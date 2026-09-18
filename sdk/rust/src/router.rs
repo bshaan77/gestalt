@@ -229,6 +229,8 @@ where
             visible: operation.visible,
             transport: String::new(),
             allowed_roles: operation.allowed_roles.clone(),
+            api: None,
+            mcp: None,
         });
 
         let handler = Arc::new(handler);

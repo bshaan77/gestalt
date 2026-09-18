@@ -210,6 +210,8 @@ func ToWireCatalogOperation(value *CatalogOperation) *proto.CatalogOperation {
 		Transport:      value.Transport,
 		AllowedRoles:   value.AllowedRoles,
 		Response:       ToWireOperationResponseSpec(value.Response),
+		Api:            value.Api,
+		Mcp:            value.Mcp,
 	}
 	for _, item := range value.Parameters {
 		out.Parameters = append(out.Parameters, ToWireCatalogParameter(item))
@@ -235,6 +237,8 @@ func FromWireCatalogOperation(value *proto.CatalogOperation) *CatalogOperation {
 		Transport:      value.Transport,
 		AllowedRoles:   value.AllowedRoles,
 		Response:       FromWireOperationResponseSpec(value.Response),
+		Api:            value.Api,
+		Mcp:            value.Mcp,
 	}
 	for _, item := range value.Parameters {
 		out.Parameters = append(out.Parameters, FromWireCatalogParameter(item))
