@@ -12,6 +12,7 @@ import (
 	"github.com/valon-technologies/gestalt/server/internal/config"
 	"github.com/valon-technologies/gestalt/server/internal/workflowwire"
 	proto "github.com/valon-technologies/gestalt/server/rpc/protov1/v1"
+	providermanifestv1 "github.com/valon-technologies/gestalt/server/sdk/providermanifest/v1"
 	"github.com/valon-technologies/gestalt/server/services/identity/principal"
 )
 
@@ -257,11 +258,43 @@ func TestReconcileWorkflowConfigDefinitions_AttachesBootstrapPrincipal(t *testin
 	}
 }
 
+func TestReconcileRegistryWorkflowConnections(t *testing.T) {
+	t.Parallel()
+	for _, phase := range []string{"startup", "rollout"} {
+		t.Run(phase, func(t *testing.T) {
+			t.Parallel()
+			cfg, runtime, provider, decls := testWorkflowReconcileEnv(t)
+			cfg.Apps["notes"].Source = config.ProviderSource{Registry: "toolshed"}
+			resolved := *cfg.Apps["notes"]
+			resolved.ResolvedManifest = &providermanifestv1.Manifest{Spec: &providermanifestv1.Spec{
+				Connections: map[string]*providermanifestv1.ManifestConnectionDef{
+					"default": {Mode: providermanifestv1.ConnectionModeNone},
+				},
+			}}
+			spec := testAppWorkflowSpecProto("availability", "service_account:notes", "*/5 * * * *")
+			spec.Target.Steps[0].GetApp().Connection = "default"
+			decls.Set("notes", &resolved, []*proto.WorkflowDefinitionSpec{spec})
+			var err error
+			if phase == "rollout" {
+				err = reconcileAppWorkflowDefinitions(context.Background(), cfg, runtime, decls, "notes")
+			} else {
+				err = reconcileWorkflowConfigDefinitions(context.Background(), cfg, runtime, decls, nil, workflowConfigReconcileOptions{allowDestructiveCleanup: true})
+			}
+			if err != nil {
+				t.Fatalf("reconcile registry workflow: %v", err)
+			}
+			if provider.definitions["app_notes_availability"] == nil {
+				t.Fatal("registry workflow was not registered")
+			}
+		})
+	}
+}
+
 func TestReconcileAppWorkflowDefinitions(t *testing.T) {
 	t.Parallel()
 
 	cfg, runtime, provider, decls := testWorkflowReconcileEnv(t)
-	decls.Set("notes", []*proto.WorkflowDefinitionSpec{
+	decls.Set("notes", nil, []*proto.WorkflowDefinitionSpec{
 		testAppWorkflowSpecProto("daily-summary", "service_account:sa1", "0 2 * * *"),
 	})
 	if err := reconcileWorkflowConfigDefinitions(context.Background(), cfg, runtime, decls, nil, workflowConfigReconcileOptions{allowDestructiveCleanup: true}); err != nil {
@@ -284,7 +317,7 @@ func TestReconcileAppWorkflowDefinitions(t *testing.T) {
 		t.Fatalf("apply subject = %q, want %q", got, workflowConfigOwnerSubjectID())
 	}
 
-	decls.Set("notes", []*proto.WorkflowDefinitionSpec{
+	decls.Set("notes", nil, []*proto.WorkflowDefinitionSpec{
 		testAppWorkflowSpecProto("daily-summary", "service_account:sa1", "0 3 * * *"),
 	})
 	if err := reconcileWorkflowConfigDefinitions(context.Background(), cfg, runtime, decls, nil, workflowConfigReconcileOptions{allowDestructiveCleanup: true}); err != nil {
@@ -294,7 +327,7 @@ func TestReconcileAppWorkflowDefinitions(t *testing.T) {
 		t.Fatalf("expected re-apply after edit, got %d applies", len(provider.appliedDefinitions))
 	}
 
-	decls.Set("notes", nil)
+	decls.Set("notes", nil, nil)
 	if err := reconcileWorkflowConfigDefinitions(context.Background(), cfg, runtime, decls, nil, workflowConfigReconcileOptions{allowDestructiveCleanup: true}); err != nil {
 		t.Fatalf("reconcile remove: %v", err)
 	}
@@ -325,7 +358,7 @@ func TestReconcileAppWorkflowDefinitions(t *testing.T) {
 		t.Fatalf("deleted after app removal = %#v", provider.deletedDefinitions)
 	}
 
-	decls.Set("notes", []*proto.WorkflowDefinitionSpec{
+	decls.Set("notes", nil, []*proto.WorkflowDefinitionSpec{
 		testAppWorkflowSpecProto("daily", "", "0 2 * * *"),
 	})
 	if err := reconcileWorkflowConfigDefinitions(context.Background(), cfg, runtime, decls, nil, workflowConfigReconcileOptions{allowDestructiveCleanup: true}); err == nil {
@@ -345,7 +378,7 @@ func TestReconcileAppWorkflowDefinitions(t *testing.T) {
 		t.Run("invalid local id "+tc.localID, func(t *testing.T) {
 			t.Parallel()
 			invalidDecls := newAppWorkflowDeclarations()
-			invalidDecls.Set("notes", []*proto.WorkflowDefinitionSpec{
+			invalidDecls.Set("notes", nil, []*proto.WorkflowDefinitionSpec{
 				testAppWorkflowSpecProto(tc.localID, "service_account:sa1", "0 2 * * *"),
 			})
 			err := reconcileWorkflowConfigDefinitions(context.Background(), cfg, runtime, invalidDecls, nil, workflowConfigReconcileOptions{allowDestructiveCleanup: true})
@@ -356,10 +389,10 @@ func TestReconcileAppWorkflowDefinitions(t *testing.T) {
 	}
 
 	decls = newAppWorkflowDeclarations()
-	decls.Set("a", []*proto.WorkflowDefinitionSpec{
+	decls.Set("a", nil, []*proto.WorkflowDefinitionSpec{
 		testAppWorkflowSpecProto("b_c", "service_account:sa1", "0 2 * * *"),
 	})
-	decls.Set("a_b", []*proto.WorkflowDefinitionSpec{
+	decls.Set("a_b", nil, []*proto.WorkflowDefinitionSpec{
 		testAppWorkflowSpecProto("c", "service_account:sa1", "0 2 * * *"),
 	})
 	if err := reconcileWorkflowConfigDefinitions(context.Background(), cfg, runtime, decls, nil, workflowConfigReconcileOptions{allowDestructiveCleanup: true}); err == nil || !strings.Contains(err.Error(), "app_a_b_c") {
