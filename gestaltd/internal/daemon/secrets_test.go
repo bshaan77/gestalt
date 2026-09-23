@@ -30,7 +30,7 @@ func TestRunSecretsUsage(t *testing.T) {
 
 	var output bytes.Buffer
 	printSecretsUsage(&output)
-	for _, want := range []string{"create", "rotate", "list", "describe", "audit", "preflight", "retire", "GESTALT_URL"} {
+	for _, want := range []string{"create", "rotate", "list", "describe", "retire", "GESTALT_URL"} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("secrets usage does not contain %q:\n%s", want, output.String())
 		}
@@ -48,8 +48,6 @@ func TestRunSecretsHelpDoesNotRequireConfiguration(t *testing.T) {
 		{"rotate", "--help"},
 		{"list", "--help"},
 		{"describe", "--help"},
-		{"audit", "--help"},
-		{"preflight", "--help"},
 		{"retire", "--help"},
 	} {
 		if err := runSecrets(args); err != nil && !errors.Is(err, flag.ErrHelp) {
@@ -176,7 +174,6 @@ func TestRunManagedSecretWriteValidation(t *testing.T) {
 	}{
 		{name: "requires name", args: []string{"--reason", "test"}, want: "secret name is required"},
 		{name: "requires reason", args: []string{"demo-secret"}, want: "--reason is required"},
-		{name: "rejects generate with file", args: []string{"demo-secret", "--reason", "test", "--generate", "--file", "/tmp/value"}, want: "--generate and --file are mutually exclusive"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -195,8 +192,9 @@ func TestValidateManagedSecretValue(t *testing.T) {
 	if _, err := validateManagedSecretValue([]byte("value")); err != nil {
 		t.Fatalf("valid value error = %v", err)
 	}
-	if _, err := validateManagedSecretValue([]byte("")); err == nil || !strings.Contains(err.Error(), "required") {
-		t.Fatalf("empty value error = %v", err)
+	value, err := validateManagedSecretValue([]byte(""))
+	if err != nil || value != "" {
+		t.Fatalf("empty value = (%q, %v), want no error", value, err)
 	}
 	if _, err := validateManagedSecretValue(bytes.Repeat([]byte("a"), managedSecretMaxBytes+1)); err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("oversized value error = %v", err)
@@ -216,18 +214,52 @@ func TestRunManagedSecretWriteReadsPipedStdin(t *testing.T) {
 	}
 }
 
-func TestRunManagedSecretWriteUsesFile(t *testing.T) {
+func TestRunManagedSecretWriteGeneratesWithoutValue(t *testing.T) {
+	restoreStdin(t, "")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid body", http.StatusBadRequest)
+			return
+		}
+		if body["value"] != nil || body["generate"] != true {
+			t.Errorf("generate body = %#v, want generate=true without value", body)
+			http.Error(w, "invalid generate request", http.StatusBadRequest)
+			return
+		}
+		_, _ = w.Write([]byte(`{"secret":{"name":"demo-secret","scope":"app"},"version":{"version":1,"createdAt":"2026-01-01T00:00:00Z"},"generatedValue":"generated-secret","rolloutRequired":false}`))
+	}))
+	defer server.Close()
+	t.Setenv("GESTALT_URL", server.URL)
+	t.Setenv("GESTALT_API_KEY", "test-token")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	if err := runManagedSecretWrite([]string{"demo-secret", "--reason", "test"}, "create"); err != nil {
+		t.Fatalf("runManagedSecretWrite() error = %v", err)
+	}
+}
+
+func TestRunManagedSecretWriteUsesStdinFile(t *testing.T) {
 
 	valuePath := filepath.Join(t.TempDir(), "value.txt")
 	if err := os.WriteFile(valuePath, []byte("file-value"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	stdin, err := os.Open(valuePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stdin.Close() }()
+	original := os.Stdin
+	os.Stdin = stdin
+	t.Cleanup(func() { os.Stdin = original })
+
 	server := managedSecretWriteServer(t)
 	t.Setenv("GESTALT_URL", server.URL)
 	t.Setenv("GESTALT_API_KEY", "test-token")
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
-	if err := runManagedSecretWrite([]string{"demo-secret", "--reason", "test", "--owner-app", "demo", "--file", valuePath}, "create"); err != nil {
+	if err := runManagedSecretWrite([]string{"demo-secret", "--reason", "test", "--owner-app", "demo"}, "create"); err != nil {
 		t.Fatalf("runManagedSecretWrite() error = %v", err)
 	}
 }
@@ -245,8 +277,8 @@ func managedSecretWriteServer(t *testing.T) *httptest.Server {
 			http.Error(w, "invalid body", http.StatusBadRequest)
 			return
 		}
-		if body["value"] == nil {
-			t.Errorf("write body missing value: %#v", body)
+		if body["value"] == nil && body["generate"] != true {
+			t.Errorf("write body must provide value or generate: %#v", body)
 			http.Error(w, "missing value", http.StatusBadRequest)
 			return
 		}
@@ -257,29 +289,6 @@ func managedSecretWriteServer(t *testing.T) *httptest.Server {
 		}
 		_, _ = w.Write([]byte(`{"secret":{"name":"demo-secret","ownerApp":"demo","scope":"app"},"version":{"version":1,"createdAt":"2026-01-01T00:00:00Z"}}`))
 	}))
-}
-
-func TestRunManagedSecretPreflightFailsNonZero(t *testing.T) {
-
-	restoreStdin(t, `[]`)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != managedSecretsAdminPath+"/preflight" {
-			t.Errorf("preflight path = %q", r.URL.Path)
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		_, _ = w.Write([]byte(`{"ok":false,"missing":[{"name":"missing-secret"}]}`))
-	}))
-	defer server.Close()
-	t.Setenv("GESTALT_URL", server.URL)
-	t.Setenv("GESTALT_API_KEY", "test-token")
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-
-	err := runManagedSecretPreflight(nil)
-	var exitErr exitCodeError
-	if !errors.As(err, &exitErr) || exitErr.code != 1 {
-		t.Fatalf("preflight error = %#v, want exit code 1", err)
-	}
 }
 
 func TestNewManagedSecretClientRequiresURLAndToken(t *testing.T) {
